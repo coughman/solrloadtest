@@ -57,6 +57,20 @@ public class SolrUpdater {
 	}
 
 /*	private static void doCloudSolrUpdate(int numRecords, int numThreads) {
+		for (int i = 0; i < numThreads; i++) {
+			Thread t = new Thread(new SolrUpdateRunnable());
+			t.start();
+					
+		}
+	}
+	
+	static class SolrUpdateRunnable implements Runnable {
+		static Logger logger = Logger.getLogger(SolrUpdateRunnable.class);
+		
+		public void run() {
+			// TODO Auto-generated method stub
+			
+		}
 		
 	}*/
 	
@@ -92,7 +106,8 @@ public class SolrUpdater {
 		SolrInputDocument d = new SolrInputDocument();
 		
 		d.addField("id", UUID.randomUUID().toString());
-		
+
+		d.addField("log_type", node.path("log_type").asText());
 		d.addField("ctime", convertTime(node.path("ctime").asLong()));
 		d.addField("user_account_id", node.path("user_account_id").asLong());
 		d.addField("source_player_id", node.path("source_player_id").asLong());
