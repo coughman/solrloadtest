@@ -29,7 +29,7 @@ public class SolrUpdater {
 	
 	public static void main(String[] args) throws IOException, SolrServerException {
 		if (args.length != 5) {
-			System.err.println("SolrUpdater <solr_url> <json_data_file> <num_threads> <solr_queue_size> <total_num_records>");
+			System.err.println("synopsis:\njava -cp SolrLoadTest.jar com.cloudera.sa.solr.SolrUpdater <solr_url> <json_data_file> <num_threads> <solr_queue_size> <total_num_records>");
 			return;
 		}
 		int numThreads = Integer.parseInt(args[2]);
@@ -56,6 +56,15 @@ public class SolrUpdater {
 		logger.info("waiting for threads to die...");
 	}
 
+/*	private static void doCloudSolrUpdate(int numRecords, int numThreads) {
+		
+	}*/
+	
+	/**
+	 * Update solr docs using Solr ConcurrentUpdateSolrServer class
+	 * @param totalRecords
+	 * @throws IOException
+	 */
 	private static void doConcurrentUpdate(int totalRecords)
 			throws IOException {
 		
