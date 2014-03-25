@@ -14,8 +14,10 @@ import java.util.UUID;
 import org.apache.log4j.Logger;
 import org.apache.solr.client.solrj.SolrServerException;
 import org.apache.solr.client.solrj.impl.CloudSolrServer;
-import org.apache.solr.client.solrj.impl.ConcurrentUpdateSolrServer;
 import org.apache.solr.common.SolrInputDocument;
+import org.kohsuke.args4j.CmdLineException;
+import org.kohsuke.args4j.CmdLineParser;
+import org.kohsuke.args4j.Option;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -28,31 +30,46 @@ public class SolrUpdater {
 	private static final String NATIVE_SOLR_DATE_FORMAT = "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'"; // e.g. 2007-04-26T08:05:04.789Z
 	private static final SimpleDateFormat SOLR_DATE_FORMAT = new SimpleDateFormat(NATIVE_SOLR_DATE_FORMAT);
 	
+	@Option(name="-zk", usage="zookeeper host")
+	private String zkHost = "localhost:2181/solr";
+	
+	@Option(name="-c", usage="name of Solr collection", required=true)
+	private String collection;
+	
+	@Option(name="-f", usage="path of json file with data", required=true)
+	private String jsonFilePath;
+	
+	@Option(name="-t", usage="number of threads")
+	private int numThreads = 1;
+	
+	@Option(name="-n", usage="total number of solr documents to update", required=true)
+	private int numRecords;
+	
 	public static void main(String[] args) throws IOException, SolrServerException {
-		if (args.length != 7) {
-			System.err.println("synopsis:\njava -cp SolrLoadTest.jar com.cloudera.sa.solr.SolrUpdater <zk_host> <solr_url> <json_data_file> <num_threads> <solr_queue_size> <total_num_records>");
-			return;
-		}
-		
-		String zkHost = args[0];
-		//String solrUrl = args[1];
-		String collectionName = args[2];
-		String inputFile = args[3];
-		int numThreads = Integer.parseInt(args[4]);
-		//int queueSize = Integer.parseInt(args[5]);
-		int totalRecords = Integer.parseInt(args[6]);
-		
-		loadInputFileIntoMemory(inputFile);	
-		
-		doCloudSolrUpdate(totalRecords, numThreads, zkHost, collectionName);
-		//doConcurrentUpdate(totalRecords, solrUrl, queueSize, numThreads);
-				
-		logger.info("waiting for threads to die...");
+		new SolrUpdater().doMain(args);				
 	}
 
-	static void doCloudSolrUpdate(int numRecords, int numThreads, String zkHost, String collectionName) throws MalformedURLException {
+	public void doMain(String[] args) throws IOException {
+		CmdLineParser parser = new CmdLineParser(this);
+		try {
+			parser.parseArgument(args);
+		
+			loadInputFileIntoMemory(this.jsonFilePath);	
+			
+			doCloudSolrUpdate();
+			//doConcurrentUpdate(totalRecords, solrUrl, queueSize, numThreads);
+					
+			logger.info("waiting for threads to die...");
+			
+		} catch (CmdLineException e) {
+			System.err.println(e.getMessage());
+			parser.printUsage(System.err);			
+		}
+	}
+	
+	private void doCloudSolrUpdate() throws MalformedURLException {
 		logger.info("using CloudSolrServer class for indexing...");
-		int numRecordsLeft = numRecords;
+		int numRecordsLeft = this.numRecords;
 		
 		if (numRecords < numThreads) {
 			logger.error("number of records must be larger than number of threads.  Aborting...");
@@ -62,7 +79,7 @@ public class SolrUpdater {
 		int numRecordsPerThread = numRecords / numThreads;
 		for (int i = 0; i < numThreads; i++) {
 			Thread t = new Thread(new SolrUpdateRunnable(zkHost, 
-					(numRecordsLeft > numRecordsPerThread) ? numRecordsPerThread : numRecordsLeft, collectionName));
+					(numRecordsLeft > numRecordsPerThread) ? numRecordsPerThread : numRecordsLeft, this.collection));
 			t.start();
 			numRecordsLeft-=numRecordsPerThread;
 		}
@@ -128,7 +145,7 @@ public class SolrUpdater {
 	 * @param solrUrl 
 	 * @throws IOException
 	 */
-	static void doConcurrentUpdate(int totalRecords, String solrUrl, int queueSize, int numThreads) {
+	/*static void doConcurrentUpdate(int totalRecords, String solrUrl, int queueSize, int numThreads) {
 		logger.info("using ConcurrentUpdateSolrServer class for indexing...");
 
 		ConcurrentUpdateSolrServer solrServer = new ConcurrentUpdateSolrServer(solrUrl, queueSize, numThreads);
@@ -168,7 +185,7 @@ public class SolrUpdater {
 		finally {
 			solrServer.shutdown();
 		}
-	}
+	}*/
 
 	private static String convertTime(long unixTimeInSeconds) {
 		return SOLR_DATE_FORMAT.format(new Date(unixTimeInSeconds * 1000));
