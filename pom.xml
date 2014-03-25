@@ -2,7 +2,7 @@
   <modelVersion>4.0.0</modelVersion>
   <groupId>com.cloudera.sa.solr</groupId>
   <artifactId>SolrLoadTest</artifactId>
-  <version>0.0.1-SNAPSHOT</version>
+  <version>0.0.2-SNAPSHOT</version>
   <name>solr-load-test</name>
 
 	<properties>
@@ -86,11 +86,6 @@
 					<filters>
 						<filter>
 							<artifact>*:*</artifact>
-							<excludes>
-								<exclude>META-INF/*.SF</exclude>
-								<exclude>META-INF/*.DSA</exclude>
-								<exclude>META-INF/*.RSA</exclude>
-							</excludes>
 						</filter>
 					</filters>
 				</configuration>
