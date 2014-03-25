@@ -54,8 +54,8 @@ public class SolrUpdater {
 	@Option(name="-solr", usage="solr url with collection and shard specified", depends={"-mode"})
 	private String solrUrl;
 	
-	@Option(name="-q", usage="queue/batch size for concurrent mode, default: 1000", depends={"-mode"})
-	private int queueSize = 1000;
+	@Option(name="-q", usage="queue/batch size, default: 1000")
+	private int batchSize = 1000;
 	
 
 	public static void main(String[] args) throws IOException, SolrServerException {
@@ -97,7 +97,7 @@ public class SolrUpdater {
 			if (solrServerMode.equals("cloud"))
 				doCloudSolrUpdate();
 			else
-				doConcurrentUpdate(numRecords, solrUrl, queueSize, numThreads);
+				doConcurrentUpdate(numRecords, solrUrl, batchSize, numThreads);
 					
 			logger.info("waiting for threads to die...");
 			
@@ -110,10 +110,10 @@ public class SolrUpdater {
 	
 	private void doCloudSolrUpdate() throws SolrServerException, IOException {
 		logger.info("using CloudSolrServer class for indexing via zookeeper: " + this.zkHost);
-		CloudSolrServer server = new CloudSolrServer(this.zkHost);
-		server.setDefaultCollection(this.collection);
+		CloudSolrServer solrServer = new CloudSolrServer(this.zkHost);
+		solrServer.setDefaultCollection(this.collection);
 		
-		SolrPingResponse response = server.ping();
+		SolrPingResponse response = solrServer.ping();
 		logger.debug("solr server response: " + response);
 		
 		int numRecordsLeft = this.numRecords;
@@ -132,10 +132,22 @@ public class SolrUpdater {
 			offset = i * numRecordsPerThread;
 			
 			Thread t = new Thread(new SolrUpdateRunnable(zkHost, 
-					(numRecordsLeft > numRecordsPerThread) ? numRecordsPerThread : numRecordsLeft, offset, this.collection));
+					(numRecordsLeft > numRecordsPerThread) ? numRecordsPerThread : numRecordsLeft, offset, this.collection, this.batchSize));
 			t.start();
 			numRecordsLeft-=numRecordsPerThread;
 		}
+		
+		try {
+			logger.info("begin committing");
+			long startTime = Calendar.getInstance().getTimeInMillis();				
+			solrServer.commit();
+			logger.info("finished committing.  Commit elapsed time: " + (Calendar.getInstance().getTimeInMillis() - startTime)/1000.0 + "s");		
+		} catch (Exception e) {
+			logger.error("failed to commit", e);
+		}
+		finally {
+			solrServer.shutdown();
+		}		
 		
 	}
 	
@@ -145,50 +157,53 @@ public class SolrUpdater {
 		CloudSolrServer solrServer;
 		int numRecords;
 		int offset;
+		int batchSize;
 		
-		public SolrUpdateRunnable(String zkHost, int numRecords, int offset, String collectionName) throws MalformedURLException
+		public SolrUpdateRunnable(String zkHost, int numRecords, int offset, String collectionName, int batchSize) throws MalformedURLException
 		{
 			this.zkHost = zkHost;
 			this.solrServer = new CloudSolrServer(zkHost);
 			this.solrServer.setDefaultCollection(collectionName);
 			this.numRecords = numRecords;
 			this.offset = offset;
+			this.batchSize = batchSize;
 		}
 		
 		public void run() {
-			ArrayList<SolrInputDocument> docs = new ArrayList<SolrInputDocument>(numRecords);
+			ArrayList<SolrInputDocument> docs = new ArrayList<SolrInputDocument>(batchSize);
 			int currentIndex = (this.offset < records.size()) ? this.offset : this.offset % records.size();
+			long startTime = Calendar.getInstance().getTimeInMillis();
 
 			for (int i = 0; i < numRecords; i++) {
 				SolrInputDocument doc = parseDocument(records.get(currentIndex++));
 				docs.add(doc);
+				
+				if (docs.size() >= batchSize)
+				{
+					addDocs(docs);			
+					docs.clear();
+				}
+			
 				if (currentIndex == records.size())
 					currentIndex = 0;				
 			}
-			long startTime;
+
+			addDocs(docs);			
+			logger.info("added " + numRecords + " docs in " + (Calendar.getInstance().getTimeInMillis() - startTime)/1000.0 + "s");
+			
+		}
+
+		private void addDocs(ArrayList<SolrInputDocument> docs) {
+			if (docs.size() == 0) return;
 			
 			try {
-				startTime = Calendar.getInstance().getTimeInMillis();
+				long startTime = Calendar.getInstance().getTimeInMillis();
 				solrServer.add(docs);
 				long elapsedTime = Calendar.getInstance().getTimeInMillis() - startTime;
-				logger.info("finished adding " + numRecords + " documents");
-				logger.info("Update elapsed time: " + elapsedTime/1000.0 + "s");
+				logger.debug("added " + docs.size() + " documents in one batch. Elapsed time: " + elapsedTime/1000.0 + "s");
 			} catch (Exception e) {
 				logger.error("failed to add solr docs", e);
-			} 
-			
-			try {
-				logger.info("begin committing");
-				startTime = Calendar.getInstance().getTimeInMillis();				
-				solrServer.commit();
-				logger.info("finished committing.  Commit elapsed time: " + (Calendar.getInstance().getTimeInMillis() - startTime)/1000.0 + "s");		
-			} catch (Exception e) {
-				logger.error("failed to commit", e);
 			}
-			finally {
-				solrServer.shutdown();
-			}
-			
 		}
 		
 	}
