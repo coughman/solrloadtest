@@ -11,9 +11,12 @@ import java.util.Calendar;
 import java.util.Date;
 import java.util.UUID;
 
+import org.apache.commons.lang3.StringUtils;
 import org.apache.log4j.Logger;
 import org.apache.solr.client.solrj.SolrServerException;
 import org.apache.solr.client.solrj.impl.CloudSolrServer;
+import org.apache.solr.client.solrj.impl.ConcurrentUpdateSolrServer;
+import org.apache.solr.client.solrj.response.SolrPingResponse;
 import org.apache.solr.common.SolrInputDocument;
 import org.kohsuke.args4j.CmdLineException;
 import org.kohsuke.args4j.CmdLineParser;
@@ -30,45 +33,89 @@ public class SolrUpdater {
 	private static final String NATIVE_SOLR_DATE_FORMAT = "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'"; // e.g. 2007-04-26T08:05:04.789Z
 	private static final SimpleDateFormat SOLR_DATE_FORMAT = new SimpleDateFormat(NATIVE_SOLR_DATE_FORMAT);
 	
+	@Option(name="-mode", aliases="-m", usage="solr server implementation, either cloud (default) or concurrent")
+	private String solrServerMode = "cloud";
+	
 	@Option(name="-zk", usage="zookeeper host")
 	private String zkHost = "localhost:2181/solr";
 	
-	@Option(name="-c", usage="name of Solr collection", required=true)
+	@Option(name="-c", usage="name of Solr collection")
 	private String collection;
 	
-	@Option(name="-f", usage="path of json file with data", required=true)
-	private String jsonFilePath;
+	@Option(name="-f", usage="path of JSON file with data", required=true)
+	private File JSONFile;
 	
-	@Option(name="-t", usage="number of threads")
+	@Option(name="-t", usage="number of threads, default: 1 thread")
 	private int numThreads = 1;
 	
 	@Option(name="-n", usage="total number of solr documents to update", required=true)
 	private int numRecords;
 	
+	@Option(name="-solr", usage="solr url with collection and shard specified", depends={"-mode"})
+	private String solrUrl;
+	
+	@Option(name="-q", usage="queue/batch size for concurrent mode, default: 1000", depends={"-mode"})
+	private int queueSize = 1000;
+	
+
 	public static void main(String[] args) throws IOException, SolrServerException {
 		new SolrUpdater().doMain(args);				
 	}
 
-	public void doMain(String[] args) throws IOException {
+	public static void printExample() {
+		System.out.println("\nExample using Solr Cloud (default):");
+		System.out.println("java -jar SolrLoadTest.jar " + SolrUpdater.class.getName() + " -zk <zkhost:2181/solr> -c <collection> -f <data_file> -t 10 -n 10000");
+		System.out.println("\nExample using Concurrent Solr Server:");
+		System.out.println("java -jar SolrLoadTest.jar " + SolrUpdater.class.getName() + " -solr <solr_host:8983/solr/collection_shard1_replica1> -f <data_file> -t 10 -n 10000");
+	}
+	
+	public void doMain(String[] args) throws IOException, SolrServerException {
 		CmdLineParser parser = new CmdLineParser(this);
 		try {
 			parser.parseArgument(args);
-		
-			loadInputFileIntoMemory(this.jsonFilePath);	
 			
-			doCloudSolrUpdate();
-			//doConcurrentUpdate(totalRecords, solrUrl, queueSize, numThreads);
+			if (solrServerMode.equals("cloud"))
+			{
+				if (StringUtils.isEmpty(this.collection)) {
+					System.err.println("must specify collection (-c) param in cloud mode\n");
+					parser.printUsage(System.err);			
+					printExample();
+					return;
+				}
+			}
+			else {
+				if (StringUtils.isEmpty(this.solrUrl)) {
+					System.err.println("must specify solr url (-solr) param\n");
+					parser.printUsage(System.err);			
+					printExample();
+					return;
+				}					
+			}
+		
+			loadInputFileIntoMemory(this.JSONFile);	
+			
+			if (solrServerMode.equals("cloud"))
+				doCloudSolrUpdate();
+			else
+				doConcurrentUpdate(numRecords, solrUrl, queueSize, numThreads);
 					
 			logger.info("waiting for threads to die...");
 			
 		} catch (CmdLineException e) {
 			System.err.println(e.getMessage());
-			parser.printUsage(System.err);			
+			parser.printUsage(System.err);		
+			printExample();
 		}
 	}
 	
-	private void doCloudSolrUpdate() throws MalformedURLException {
-		logger.info("using CloudSolrServer class for indexing...");
+	private void doCloudSolrUpdate() throws SolrServerException, IOException {
+		logger.info("using CloudSolrServer class for indexing via zookeeper: " + this.zkHost);
+		CloudSolrServer server = new CloudSolrServer(this.zkHost);
+		server.setDefaultCollection(this.collection);
+		
+		SolrPingResponse response = server.ping();
+		logger.debug("solr server response: " + response);
+		
 		int numRecordsLeft = this.numRecords;
 		
 		if (numRecords < numThreads) {
@@ -76,13 +123,20 @@ public class SolrUpdater {
 			return;
 		}
 		
-		int numRecordsPerThread = numRecords / numThreads;
+		int numRecordsPerThread = (int) Math.ceil(1.0 * numRecords / numThreads);
+		logger.debug("number of records per thread: " + numRecordsPerThread);
+		
+		int offset = 0;
+		
 		for (int i = 0; i < numThreads; i++) {
+			offset = i * numRecordsPerThread;
+			
 			Thread t = new Thread(new SolrUpdateRunnable(zkHost, 
-					(numRecordsLeft > numRecordsPerThread) ? numRecordsPerThread : numRecordsLeft, this.collection));
+					(numRecordsLeft > numRecordsPerThread) ? numRecordsPerThread : numRecordsLeft, offset, this.collection));
 			t.start();
 			numRecordsLeft-=numRecordsPerThread;
 		}
+		
 	}
 	
 	static class SolrUpdateRunnable implements Runnable {
@@ -90,18 +144,20 @@ public class SolrUpdater {
 		static Logger logger = Logger.getLogger(SolrUpdateRunnable.class);
 		CloudSolrServer solrServer;
 		int numRecords;
+		int offset;
 		
-		public SolrUpdateRunnable(String zkHost, int numRecords, String collectionName) throws MalformedURLException
+		public SolrUpdateRunnable(String zkHost, int numRecords, int offset, String collectionName) throws MalformedURLException
 		{
 			this.zkHost = zkHost;
 			this.solrServer = new CloudSolrServer(zkHost);
 			this.solrServer.setDefaultCollection(collectionName);
 			this.numRecords = numRecords;
+			this.offset = offset;
 		}
 		
 		public void run() {
 			ArrayList<SolrInputDocument> docs = new ArrayList<SolrInputDocument>(numRecords);
-			int currentIndex = 0;
+			int currentIndex = (this.offset < records.size()) ? this.offset : this.offset % records.size();
 
 			for (int i = 0; i < numRecords; i++) {
 				SolrInputDocument doc = parseDocument(records.get(currentIndex++));
@@ -143,12 +199,15 @@ public class SolrUpdater {
 	 * @param numThreads 
 	 * @param queueSize 
 	 * @param solrUrl 
+	 * @throws SolrServerException 
 	 * @throws IOException
 	 */
-	/*static void doConcurrentUpdate(int totalRecords, String solrUrl, int queueSize, int numThreads) {
-		logger.info("using ConcurrentUpdateSolrServer class for indexing...");
+	static void doConcurrentUpdate(int totalRecords, String solrUrl, int queueSize, int numThreads) throws SolrServerException, IOException {
+		logger.info("using ConcurrentUpdateSolrServer class for indexing connecting to Solr: " + solrUrl);
 
 		ConcurrentUpdateSolrServer solrServer = new ConcurrentUpdateSolrServer(solrUrl, queueSize, numThreads);
+		SolrPingResponse response = solrServer.ping();
+		logger.debug("response status: " + response.getStatus());
 		
 		int currentIndex = 0;
 		ArrayList<SolrInputDocument> docs = new ArrayList<SolrInputDocument>(totalRecords);
@@ -185,7 +244,7 @@ public class SolrUpdater {
 		finally {
 			solrServer.shutdown();
 		}
-	}*/
+	}
 
 	private static String convertTime(long unixTimeInSeconds) {
 		return SOLR_DATE_FORMAT.format(new Date(unixTimeInSeconds * 1000));
@@ -221,8 +280,8 @@ public class SolrUpdater {
 		return d;
 	}
 
-	private static void loadInputFileIntoMemory(String inputFile) throws IOException {
-		BufferedReader reader = new BufferedReader(new FileReader(new File(inputFile)));
+	private static void loadInputFileIntoMemory(File inputFile) throws IOException {
+		BufferedReader reader = new BufferedReader(new FileReader(inputFile));
 		ObjectMapper mapper = new ObjectMapper();
 		
 		String line;
