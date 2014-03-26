@@ -10,6 +10,7 @@ import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.Date;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.log4j.Logger;
@@ -57,8 +58,9 @@ public class SolrUpdater {
 	@Option(name="-q", usage="queue/batch size, default: 1000")
 	private int batchSize = 1000;
 	
-
-	public static void main(String[] args) throws IOException, SolrServerException {
+	static AtomicInteger numRunningThreads = new AtomicInteger(0);
+	
+	public static void main(String[] args) throws IOException, SolrServerException, InterruptedException {
 		new SolrUpdater().doMain(args);				
 	}
 
@@ -69,7 +71,7 @@ public class SolrUpdater {
 		System.out.println("java -jar SolrLoadTest.jar " + SolrUpdater.class.getName() + " -solr <solr_host:8983/solr/collection_shard1_replica1> -f <data_file> -t 10 -n 10000");
 	}
 	
-	public void doMain(String[] args) throws IOException, SolrServerException {
+	public void doMain(String[] args) throws IOException, SolrServerException, InterruptedException {
 		CmdLineParser parser = new CmdLineParser(this);
 		try {
 			parser.parseArgument(args);
@@ -99,7 +101,7 @@ public class SolrUpdater {
 			else
 				doConcurrentUpdate(numRecords, solrUrl, batchSize, numThreads);
 					
-			logger.info("waiting for threads to die...");
+			//logger.info("waiting for threads to die...");
 			
 		} catch (CmdLineException e) {
 			System.err.println(e.getMessage());
@@ -108,7 +110,7 @@ public class SolrUpdater {
 		}
 	}
 	
-	private void doCloudSolrUpdate() throws SolrServerException, IOException {
+	private void doCloudSolrUpdate() throws SolrServerException, IOException, InterruptedException {
 		logger.info("using CloudSolrServer class for indexing via zookeeper: " + this.zkHost);
 		CloudSolrServer solrServer = new CloudSolrServer(this.zkHost);
 		solrServer.setDefaultCollection(this.collection);
@@ -135,10 +137,18 @@ public class SolrUpdater {
 					(numRecordsLeft > numRecordsPerThread) ? numRecordsPerThread : numRecordsLeft, offset, this.collection, this.batchSize));
 			t.start();
 			numRecordsLeft-=numRecordsPerThread;
+			numRunningThreads.incrementAndGet();
 		}
 		
+		logger.info("waiting for update threads to finish...");
+		while (numRunningThreads.get() > 0) {
+			System.out.print(".");
+			Thread.sleep(5000);
+		}
+		System.out.println();
+		
 		try {
-			logger.info("begin committing");
+			logger.info("all updates finished, begin committing");
 			long startTime = Calendar.getInstance().getTimeInMillis();				
 			solrServer.commit();
 			logger.info("finished committing.  Commit elapsed time: " + (Calendar.getInstance().getTimeInMillis() - startTime)/1000.0 + "s");		
@@ -191,6 +201,7 @@ public class SolrUpdater {
 			addDocs(docs);			
 			logger.info("added " + numRecords + " docs in " + (Calendar.getInstance().getTimeInMillis() - startTime)/1000.0 + "s");
 			
+			numRunningThreads.decrementAndGet();			
 		}
 
 		private void addDocs(ArrayList<SolrInputDocument> docs) {
