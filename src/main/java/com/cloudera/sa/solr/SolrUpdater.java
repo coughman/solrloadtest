@@ -9,6 +9,8 @@ import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.Date;
+import java.util.Iterator;
+import java.util.Map.Entry;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -23,6 +25,7 @@ import org.kohsuke.args4j.CmdLineException;
 import org.kohsuke.args4j.CmdLineParser;
 import org.kohsuke.args4j.Option;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -58,7 +61,12 @@ public class SolrUpdater {
 	@Option(name="-q", usage="queue/batch size, default: 1000")
 	private int batchSize = 1000;
 	
+	@Option(name="-s", usage="schema in JSON", required=true)
+	private File JSONSchemaFile;
+	
 	static AtomicInteger numRunningThreads = new AtomicInteger(0);
+
+	private static JsonNode schemaNode;
 	
 	public static void main(String[] args) throws IOException, SolrServerException, InterruptedException {
 		new SolrUpdater().doMain(args);				
@@ -94,15 +102,14 @@ public class SolrUpdater {
 				}					
 			}
 		
-			loadInputFileIntoMemory(this.JSONFile);	
+			loadInputFileIntoMemory(this.JSONFile);
+			schemaNode = loadSchema(this.JSONSchemaFile);
 			
 			if (solrServerMode.equals("cloud"))
 				doCloudSolrUpdate();
 			else
 				doConcurrentUpdate(numRecords, solrUrl, batchSize, numThreads);
-					
-			//logger.info("waiting for threads to die...");
-			
+								
 		} catch (CmdLineException e) {
 			System.err.println(e.getMessage());
 			parser.printUsage(System.err);		
@@ -185,7 +192,9 @@ public class SolrUpdater {
 			long startTime = Calendar.getInstance().getTimeInMillis();
 
 			for (int i = 0; i < numRecords; i++) {
-				SolrInputDocument doc = parseDocument(records.get(currentIndex++));
+				SolrInputDocument doc = parseDocument(records.get(currentIndex++), schemaNode);
+				if (doc == null) continue;
+				
 				docs.add(doc);
 				
 				if (docs.size() >= batchSize)
@@ -241,7 +250,7 @@ public class SolrUpdater {
 		long startTime = Calendar.getInstance().getTimeInMillis();
 		
 		for (int i = 0; i < totalRecords; i++) {
-			SolrInputDocument doc = parseDocument(records.get(currentIndex++));
+			SolrInputDocument doc = parseDocument(records.get(currentIndex++), schemaNode);
 
 			logger.trace("adding solr doc:" + doc);
 			docs.add(doc);
@@ -276,36 +285,39 @@ public class SolrUpdater {
 		return SOLR_DATE_FORMAT.format(new Date(unixTimeInSeconds * 1000));
 	}
 	
-	private static SolrInputDocument parseDocument(JsonNode node) {
+	private static SolrInputDocument parseDocument(JsonNode node, JsonNode schemaNode) {
 		SolrInputDocument d = new SolrInputDocument();
 		
-		d.addField("id", UUID.randomUUID().toString());
-
-		d.addField("log_type", node.path("log_type").asText());
-		d.addField("ctime", convertTime(node.path("ctime").asLong()));
-		d.addField("user_account_id", node.path("user_account_id").asLong());
-		d.addField("source_player_id", node.path("source_player_id").asLong());
-
-		d.addField("build_id", node.path("build_id").asLong());
-		d.addField("realm_id", node.path("realm_id").asLong());
-		d.addField("world_id", node.path("world_id").asInt());
-		d.addField("zone_id", node.path("zone_id").asInt());
-		d.addField("world_occurrence_id", node.path("world_occurrence_id").asInt());
-
-		d.addField("xloc", node.path("xloc").asInt());
-		d.addField("yloc", node.path("yloc").asInt());
-		d.addField("zloc", node.path("zloc").asInt());
+		for (Iterator<Entry<String, JsonNode>> i = schemaNode.fields(); i.hasNext();) {
+			Entry<String,JsonNode> e = i.next();
+			String type = e.getValue().asText();
+			String field = e.getKey();
 		
-		d.addField("player_level", node.path("player_level").asInt());
-		d.addField("action", node.path("action").asInt());
-		d.addField("action_id", node.path("action_id").asLong());
-		d.addField("current_full", node.path("current_full").asInt());
-		d.addField("current_partial", node.path("current_partial").asInt());
-		d.addField("quest_reward", node.path("quest_reward").asInt());
-
+			if (type.equals("text"))
+				d.addField(field, node.path(field).asText());
+			else if (type.equals("int"))
+				d.addField(field, node.path(field).asInt());
+			else if (type.equals("long"))
+				d.addField(field, node.path(field).asLong());
+			else if (type.equals("uuid"))
+				d.addField(field, UUID.randomUUID().toString());
+			else if (type.equals("time"))
+				d.addField(field, convertTime(node.path(field).asLong()));
+			else
+			{
+				logger.error("unrecognized type for field: " + field + " type:" + type);
+				return null;
+			}
+			
+		}
 		return d;
 	}
 
+	private static JsonNode loadSchema(File schemaFile) throws JsonProcessingException, IOException {
+		ObjectMapper mapper = new ObjectMapper();
+		return mapper.readTree(schemaFile);
+	}
+	
 	private static void loadInputFileIntoMemory(File inputFile) throws IOException {
 		BufferedReader reader = new BufferedReader(new FileReader(inputFile));
 		ObjectMapper mapper = new ObjectMapper();
