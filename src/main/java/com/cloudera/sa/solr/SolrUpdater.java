@@ -315,8 +315,13 @@ public class SolrUpdater {
 				d.addField(field, node.path(field).asInt());
 			else if (type.equals("long"))
 				d.addField(field, node.path(field).asLong());
-			else if (type.equals("uuid"))
-				d.addField(field, UUID.randomUUID().toString());
+			else if (type.equals("uuid")) {
+				// generates a new uuid if it's absent
+				if (StringUtils.isEmpty(node.path(field).asText()))
+					d.addField(field, UUID.randomUUID().toString());
+				else
+					d.addField(field, node.path(field).asText());
+			}
 			else if (type.equals("date") || type.equals("tdate"))
 				d.addField(field, convertTime(node.path(field).asLong()));
 			else
