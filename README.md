@@ -3,6 +3,11 @@ SolrLoadTest
 
 Utility for updating solr with JSON data.  Used for load testing Solr.  Solr Cloud ready.  Multi-threaded capable.
 
+Prerequisities
+--------------
+- JSON data file, one record per line
+- valid solr schema.xml for JSON data
+
 To build
 --------
 ```mvn package```
