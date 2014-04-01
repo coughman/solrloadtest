@@ -9,10 +9,19 @@ import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.Date;
-import java.util.Iterator;
-import java.util.Map.Entry;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
+
+import javax.xml.parsers.DocumentBuilder;
+import javax.xml.parsers.DocumentBuilderFactory;
+import javax.xml.parsers.ParserConfigurationException;
+import javax.xml.xpath.XPath;
+import javax.xml.xpath.XPathConstants;
+import javax.xml.xpath.XPathExpression;
+import javax.xml.xpath.XPathExpressionException;
+import javax.xml.xpath.XPathFactory;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.log4j.Logger;
@@ -24,8 +33,12 @@ import org.apache.solr.common.SolrInputDocument;
 import org.kohsuke.args4j.CmdLineException;
 import org.kohsuke.args4j.CmdLineParser;
 import org.kohsuke.args4j.Option;
+import org.w3c.dom.Document;
+import org.w3c.dom.NamedNodeMap;
+import org.w3c.dom.Node;
+import org.w3c.dom.NodeList;
+import org.xml.sax.SAXException;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -61,12 +74,12 @@ public class SolrUpdater {
 	@Option(name="-q", usage="queue/batch size, default: 1000")
 	private int batchSize = 1000;
 	
-	@Option(name="-s", usage="schema in JSON", required=true)
-	private File JSONSchemaFile;
+	@Option(name="-s", usage="solr schema", required=true)
+	private File solrSchemaFile;
 	
 	static AtomicInteger numRunningThreads = new AtomicInteger(0);
 
-	private static JsonNode schemaNode;
+	private static Map<String, String> fieldTypeMap;
 	
 	public static void main(String[] args) throws IOException, SolrServerException, InterruptedException {
 		new SolrUpdater().doMain(args);				
@@ -103,7 +116,7 @@ public class SolrUpdater {
 			}
 		
 			loadInputFileIntoMemory(this.JSONFile);
-			schemaNode = loadSchema(this.JSONSchemaFile);
+			fieldTypeMap = loadSolrSchema(solrSchemaFile);
 			
 			if (solrServerMode.equals("cloud"))
 				doCloudSolrUpdate();
@@ -112,6 +125,10 @@ public class SolrUpdater {
 								
 		} catch (CmdLineException e) {
 			System.err.println(e.getMessage());
+			parser.printUsage(System.err);		
+			printExample();
+		} catch (Exception e) {
+			System.err.println("failed to parse solr schema from file: " + solrSchemaFile);
 			parser.printUsage(System.err);		
 			printExample();
 		}
@@ -192,7 +209,7 @@ public class SolrUpdater {
 			long startTime = Calendar.getInstance().getTimeInMillis();
 
 			for (int i = 0; i < numRecords; i++) {
-				SolrInputDocument doc = parseDocument(records.get(currentIndex++), schemaNode);
+				SolrInputDocument doc = parseDocument(records.get(currentIndex++));
 				if (doc == null) continue;
 				
 				docs.add(doc);
@@ -250,7 +267,7 @@ public class SolrUpdater {
 		long startTime = Calendar.getInstance().getTimeInMillis();
 		
 		for (int i = 0; i < totalRecords; i++) {
-			SolrInputDocument doc = parseDocument(records.get(currentIndex++), schemaNode);
+			SolrInputDocument doc = parseDocument(records.get(currentIndex++));
 
 			logger.trace("adding solr doc:" + doc);
 			docs.add(doc);
@@ -285,15 +302,14 @@ public class SolrUpdater {
 		return SOLR_DATE_FORMAT.format(new Date(unixTimeInSeconds * 1000));
 	}
 	
-	private static SolrInputDocument parseDocument(JsonNode node, JsonNode schemaNode) {
+	private static SolrInputDocument parseDocument(JsonNode node) {
 		SolrInputDocument d = new SolrInputDocument();
 		
-		for (Iterator<Entry<String, JsonNode>> i = schemaNode.fields(); i.hasNext();) {
-			Entry<String,JsonNode> e = i.next();
-			String type = e.getValue().asText();
+		for (Map.Entry<String, String> e : fieldTypeMap.entrySet()) {
 			String field = e.getKey();
-		
-			if (type.equals("text"))
+			String type = e.getValue();
+
+			if (type.equals("string"))
 				d.addField(field, node.path(field).asText());
 			else if (type.equals("int"))
 				d.addField(field, node.path(field).asInt());
@@ -301,21 +317,40 @@ public class SolrUpdater {
 				d.addField(field, node.path(field).asLong());
 			else if (type.equals("uuid"))
 				d.addField(field, UUID.randomUUID().toString());
-			else if (type.equals("time"))
+			else if (type.equals("date") || type.equals("tdate"))
 				d.addField(field, convertTime(node.path(field).asLong()));
 			else
 			{
 				logger.error("unrecognized type for field: " + field + " type:" + type);
 				return null;
-			}
-			
+			}			
 		}
+		
 		return d;
 	}
-
-	private static JsonNode loadSchema(File schemaFile) throws JsonProcessingException, IOException {
-		ObjectMapper mapper = new ObjectMapper();
-		return mapper.readTree(schemaFile);
+	
+	private static Map<String, String> loadSolrSchema(File schemaFile) throws SAXException, IOException, ParserConfigurationException, XPathExpressionException {
+		HashMap<String, String> nameTypeMap = new HashMap<String, String>();
+		
+		DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+		DocumentBuilder builder = factory.newDocumentBuilder();
+		Document d = builder.parse(schemaFile);
+		
+		XPathFactory xPathFactory = XPathFactory.newInstance();
+		XPath xPath = xPathFactory.newXPath();
+		XPathExpression expression = xPath.compile("/schema/fields/field");
+		NodeList list = (NodeList)expression.evaluate(d, XPathConstants.NODESET);
+		
+		for (int i = 0; i < list.getLength(); i++) {
+			Node n = list.item(i);
+			NamedNodeMap attributeMap = n.getAttributes();
+			String name = attributeMap.getNamedItem("name").getNodeValue();
+			String type = attributeMap.getNamedItem("type").getNodeValue();
+			if (!name.equals("_version_") && !type.equals("point"))
+				nameTypeMap.put(name, type);
+		}
+		
+		return nameTypeMap;
 	}
 	
 	private static void loadInputFileIntoMemory(File inputFile) throws IOException {
